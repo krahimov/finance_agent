@@ -7,35 +7,60 @@ import { documents, extractionRuns } from "@/lib/db/schema";
 import { IngestionForm } from "./IngestionForm";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export default async function IngestionPage() {
-  const db = getDb();
+  let recentDocs: Array<{
+    id: string;
+    cik: string;
+    docType: string;
+    accessionNo: string;
+    filingDate: unknown;
+    url: string;
+    createdAt: unknown;
+  }> = [];
 
-  const recentDocs = await db
-    .select({
-      id: documents.id,
-      cik: documents.cik,
-      docType: documents.docType,
-      accessionNo: documents.accessionNo,
-      filingDate: documents.filingDate,
-      url: documents.url,
-      createdAt: documents.createdAt,
-    })
-    .from(documents)
-    .orderBy(desc(documents.createdAt))
-    .limit(20);
+  let recentRuns: Array<{
+    id: string;
+    model: string;
+    promptVersion: string;
+    startedAt: Date;
+    finishedAt: Date | null;
+  }> = [];
 
-  const recentRuns = await db
-    .select({
-      id: extractionRuns.id,
-      model: extractionRuns.model,
-      promptVersion: extractionRuns.promptVersion,
-      startedAt: extractionRuns.startedAt,
-      finishedAt: extractionRuns.finishedAt,
-    })
-    .from(extractionRuns)
-    .orderBy(desc(extractionRuns.startedAt))
-    .limit(20);
+  let dbError: string | null = null;
+
+  try {
+    const db = getDb();
+
+    recentDocs = await db
+      .select({
+        id: documents.id,
+        cik: documents.cik,
+        docType: documents.docType,
+        accessionNo: documents.accessionNo,
+        filingDate: documents.filingDate,
+        url: documents.url,
+        createdAt: documents.createdAt,
+      })
+      .from(documents)
+      .orderBy(desc(documents.createdAt))
+      .limit(20);
+
+    recentRuns = await db
+      .select({
+        id: extractionRuns.id,
+        model: extractionRuns.model,
+        promptVersion: extractionRuns.promptVersion,
+        startedAt: extractionRuns.startedAt,
+        finishedAt: extractionRuns.finishedAt,
+      })
+      .from(extractionRuns)
+      .orderBy(desc(extractionRuns.startedAt))
+      .limit(20);
+  } catch (e) {
+    dbError = e instanceof Error ? e.message : String(e);
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-black dark:text-zinc-50">
@@ -64,6 +89,25 @@ export default async function IngestionPage() {
         <section className="mt-8">
           <IngestionForm />
         </section>
+
+        {dbError ? (
+          <div className="mt-8 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+            <div className="text-xs font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
+              Database not configured
+            </div>
+            <div className="mt-2">
+              This page needs Postgres to list recent documents and extraction runs. Current error:
+            </div>
+            <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-lg bg-amber-100/60 p-2 text-xs text-amber-900 dark:bg-amber-900/30 dark:text-amber-100">
+              {dbError}
+            </pre>
+            <div className="mt-3">
+              On Vercel, set <span className="font-mono">DATABASE_URL</span> (and other required env vars) for the{" "}
+              <span className="font-medium">Production</span> and <span className="font-medium">Preview</span>{" "}
+              environments, then redeploy.
+            </div>
+          </div>
+        ) : null}
 
         <section className="mt-12 space-y-3">
           <h2 className="text-lg font-semibold">Recent documents</h2>
