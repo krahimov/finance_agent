@@ -78,12 +78,17 @@ export async function screenSignals(input: ScreenSignalsInput): Promise<ScreenSi
     flow_sum: number;
   };
 
-  // drizzle's `execute` returns a driver-specific shape; we normalize below.
+  // Build a safe Postgres array literal for the CIK filter.
+  const cikArrayLiteral = ciks.length
+    ? sql.raw(`WHERE cik = ANY(ARRAY[${ciks.map((c) => `'${c}'`).join(",")}])`)
+    : sql``;
+
+  // drizzle's execute returns a driver-specific shape; we normalize below.
   const res = await db.execute(sql`
     WITH universe AS (
       SELECT DISTINCT cik
       FROM ${signals}
-      ${ciks.length ? sql`WHERE cik = ANY(${sql.array(ciks)})` : sql``}
+      ${cikArrayLiteral}
     ),
     eps_window AS (
       SELECT s.*
@@ -187,5 +192,3 @@ export async function screenSignals(input: ScreenSignalsInput): Promise<ScreenSi
     rows: out,
   };
 }
-
-

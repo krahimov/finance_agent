@@ -104,7 +104,7 @@ export default function Home() {
   });
 
   const [input, setInput] = useState("");
-  const isLoading = status === "in_progress";
+  const isLoading = status === "submitted" || status === "streaming";
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();

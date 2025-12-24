@@ -98,9 +98,13 @@ export async function applyCorrection(
   }
 
   // supersede/override: create a new assertion + close the old one.
-  const next = input.newAssertion ?? {};
+  const next: NonNullable<ApplyCorrectionInput["newAssertion"]> =
+    input.newAssertion ?? {};
   const subjectEntityId = next.subjectEntityId ?? target.subjectEntityId;
-  const predicate = (next.predicate ?? target.predicate) as ApplyCorrectionInput["newAssertion"]["predicate"];
+  const predicate = (next.predicate ??
+    (target.predicate as NonNullable<ApplyCorrectionInput["newAssertion"]>["predicate"])) as NonNullable<
+    ApplyCorrectionInput["newAssertion"]
+  >["predicate"];
   const objectEntityId = next.objectEntityId ?? target.objectEntityId;
   const sourceDocumentId = next.sourceDocumentId ?? target.sourceDocumentId;
   const sourceChunkId = next.sourceChunkId ?? target.sourceChunkId ?? null;
