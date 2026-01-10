@@ -37,6 +37,10 @@ pnpm dev
 
 See `docs/module-1-status.md` for a direct mapping of the current implementation to the Module 1 rubric in [AGENTSMYTH ENGINEERING CHALLENGE (1).pdf](file://AGENTSMYTH%20ENGINEERING%20CHALLENGE%20(1).pdf).
 
+## Architecture overview (end-to-end, with diagrams)
+
+See `docs/architecture.md` for a walkthrough of the full architecture (Postgres + Qdrant + Neo4j), including ingestion/extraction flows, hybrid retrieval, and the correction workflow — with Mermaid diagrams.
+
 ## Structured signals add-on (EPS estimates + fund inflows)
 
 See `docs/module-1-structured-signals.md` for the design + implementation plan and the new endpoints/tools that support screening prompts like “rising EPS estimates + positive fund inflows”.
