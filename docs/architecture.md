@@ -24,61 +24,135 @@ The Next.js app (Vercel AI SDK) orchestrates all three via tool calls.
 
 ---
 
-## System diagram (high-level)
+## Architecture (one-page overview)
 
 ```mermaid
 flowchart LR
-  subgraph Client
-    B[Browser\nChat UI (/) + Ingestion UI (/ingestion)]
+  subgraph client [Client]
+    ChatUI["Chat UI (/)"]
+    IngestionUI["Ingestion UI (/ingestion)"]
   end
 
-  subgraph App["Next.js (Node runtime)"]
-    ChatAPI["POST /api/chat\nVercel AI SDK streamText + tools"]
-    IngestOne["POST /api/ingest/edgar\n(single CIK)"]
-    IngestBulk["POST /api/ingest/edgar/bulk\n(concurrency + NDJSON progress)"]
-    SignalsAPI["POST /api/ingest/signals\n(time series signals)"]
-    CorrectionsAPI["POST /api/corrections\n(retract/supersede/override)"]
-    ConflictsAPI["GET /api/conflicts\n(conflict detection)"]
+  subgraph app [Next.js App (Node runtime)]
+    ChatTools["Chat + tool router (AI SDK)"]
+    Pipelines["Ingest + extract pipelines"]
   end
 
-  subgraph Stores
-    PG[(Postgres/Neon)]
-    QD[(Qdrant\ncollection: doc_chunks)]
-    N4J[(Neo4j)]
+  subgraph stores [Data stores]
+    Postgres["Postgres (Neon): truth + provenance"]
+    Qdrant["Qdrant: semantic recall"]
+    Neo4j["Neo4j: graph traversal"]
   end
 
-  subgraph External
-    SEC[SEC EDGAR]
-    OpenAI[OpenAI API\n(embeddings + extraction models)]
-    Massive[Massive/Benzinga\n(optional signals source)]
+  subgraph external [External]
+    SecEdgar["SEC EDGAR"]
+    OpenAI["OpenAI: embeddings + extraction"]
+    Massive["Massive/Benzinga (optional signals)"]
   end
 
-  B --> ChatAPI
-  B --> IngestOne
-  B --> IngestBulk
+  ChatUI --> ChatTools
+  IngestionUI --> Pipelines
 
-  IngestOne --> SEC
-  IngestBulk --> SEC
-  IngestOne --> PG
-  IngestBulk --> PG
-  IngestOne --> OpenAI
-  IngestBulk --> OpenAI
-  IngestOne --> QD
-  IngestBulk --> QD
+  Pipelines -->|"fetch filings"| SecEdgar
+  Pipelines -->|"write docs/chunks"| Postgres
+  Pipelines -->|"embed chunks"| OpenAI
+  Pipelines -->|"upsert vectors"| Qdrant
+  Pipelines -->|"project graph"| Neo4j
 
-  ChatAPI --> OpenAI
-  ChatAPI --> QD
-  ChatAPI --> PG
-  ChatAPI --> N4J
+  ChatTools -->|"vectorSearch"| Qdrant
+  ChatTools -->|"graphTraverse/explainPath"| Neo4j
+  ChatTools -->|"factsQuery/getCitations/listDocuments"| Postgres
+  ChatTools -->|"LLM responses"| OpenAI
 
-  SignalsAPI --> PG
-  SignalsAPI -. optional .-> Massive
-
-  CorrectionsAPI --> PG
-  CorrectionsAPI --> N4J
-
-  ConflictsAPI --> PG
+  Massive -. "optional ingest" .-> Postgres
 ```
+
+**Code map (for the boxes above)**:
+- **Chat + tool router**: `src/app/api/chat/route.ts`, `src/lib/ai/tools.ts`, `src/lib/retrieval/*`
+- **Ingest pipeline**: `src/lib/edgar/ingest.ts`, `src/app/api/ingest/edgar/bulk/route.ts`
+- **Extract + project pipeline**: `src/lib/extraction/run.ts`, `src/lib/neo4j/project.ts`
+- **Stores**: `src/lib/db/*`, `src/lib/qdrant/*`, `src/lib/neo4j/*`
+- **SEC fetch**: `src/lib/edgar/fetch.ts`
+
+---
+
+## Architecture (end-to-end dataflow)
+
+```mermaid
+flowchart TB
+  SecEdgar["SEC EDGAR"]
+  OpenAI["OpenAI"]
+  Postgres[(Postgres)]
+  Qdrant[(Qdrant)]
+  Neo4j[(Neo4j)]
+
+  subgraph ingest [Ingestion + indexing]
+    FetchFiling["Fetch filing HTML"]
+    HtmlToText["Strip HTML to text"]
+    ChunkText["Chunk text"]
+    WriteDocs["Write documents + chunks"]
+    EmbedChunks["Embed chunks"]
+    UpsertVectors["Upsert vectors + payload"]
+  end
+
+  subgraph extract [Extraction + projection]
+    ReadChunks["Read chunks"]
+    CreateRun["Create extraction run"]
+    LlmExtract["Extract entities + relations"]
+    UpsertEntities["Upsert entities"]
+    InsertAssertions["Insert assertions (versioned)"]
+    ProjectNeo4j["Project nodes + edges"]
+  end
+
+  subgraph serve [Serving (chat + tools)]
+    UserQ["User question"]
+    ChatApi["/api/chat"]
+    ToolRouter["Tool router"]
+    VectorSearch["vectorSearch"]
+    GraphSearch["graphTraverse/explainPath"]
+    FactsSearch["factsQuery/listDocuments"]
+    GetCitations["getCitations"]
+    Answer["Answer with citations"]
+  end
+
+  %% Ingestion
+  SecEdgar -->|"submissions + filings"| FetchFiling --> HtmlToText --> ChunkText --> WriteDocs --> Postgres
+  ChunkText --> EmbedChunks --> OpenAI
+  EmbedChunks --> UpsertVectors --> Qdrant
+
+  %% Extraction
+  Postgres -->|"documentId + chunk text"| ReadChunks --> CreateRun --> Postgres
+  ReadChunks --> LlmExtract --> OpenAI
+  LlmExtract --> UpsertEntities --> Postgres
+  LlmExtract --> InsertAssertions --> Postgres
+  UpsertEntities --> ProjectNeo4j --> Neo4j
+  InsertAssertions --> ProjectNeo4j
+
+  %% Serving
+  UserQ --> ChatApi --> ToolRouter
+  ToolRouter --> VectorSearch --> Qdrant -->|"chunkIds"| GetCitations
+  ToolRouter --> GraphSearch --> Neo4j -->|"assertionIds"| GetCitations
+  ToolRouter --> FactsSearch --> Postgres
+  GetCitations --> Postgres --> Answer
+  ChatApi --> OpenAI
+  Answer --> ChatApi
+```
+
+**How IDs connect the stores**:
+- **Qdrant → Postgres**: `vectorSearch` returns `chunkIds` (stored as `document_chunks.id`), then `getCitations` joins `document_chunks` + `documents` for citeable text.
+- **Neo4j → Postgres**: graph edges carry `assertionId`, then `getCitations(assertionIds)` resolves back to `assertions.sourceChunkId` → citeable text.
+
+**Code map (end-to-end)**:
+- **FetchFiling + HtmlToText**: `src/lib/edgar/fetch.ts`, `src/lib/text/normalize.ts`
+- **ChunkText**: `src/lib/text/chunk.ts`
+- **WriteDocs (documents + chunks)**: `src/lib/edgar/ingest.ts`, `src/lib/db/schema.ts`
+- **EmbedChunks**: `src/lib/embeddings/openai.ts`
+- **UpsertVectors**: `src/lib/edgar/ingest.ts`, `src/lib/qdrant/collections.ts`
+- **ReadChunks + CreateRun + InsertAssertions**: `src/lib/extraction/run.ts`, `src/lib/db/schema.ts`
+- **LlmExtract**: `src/lib/extraction/extract.ts`, `src/lib/extraction/schema.ts`
+- **ProjectNeo4j**: `src/lib/neo4j/project.ts`
+- **ToolRouter + tools**: `src/lib/ai/tools.ts`, `src/lib/retrieval/*`
+- **ChatApi**: `src/app/api/chat/route.ts`
 
 ---
 
@@ -226,21 +300,22 @@ The core ingestion function is `ingestEdgarLatest()` in `src/lib/edgar/ingest.ts
 
 ```mermaid
 sequenceDiagram
-  participant Op as Operator (UI / curl)
-  participant API as POST /api/ingest/edgar(/bulk)
-  participant SEC as SEC EDGAR
-  participant PG as Postgres
-  participant E as OpenAI Embeddings
-  participant Q as Qdrant (doc_chunks)
+  participant Operator as Operator
+  participant IngestAPI as IngestAPI
+  participant SecEdgar as SEC_EDGAR
+  participant Postgres as Postgres
+  participant Embeddings as OpenAI_Embeddings
+  participant Qdrant as Qdrant
 
-  Op->>API: {cik(s), forms, maxFilings, maxChunksPerFiling, ...}
-  API->>SEC: fetch submission metadata
-  API->>SEC: fetch filing HTML
-  API->>API: strip HTML → text; chunk text
-  API->>PG: insert documents + document_chunks
-  API->>E: embed chunk texts
-  API->>Q: upsert vectors + payload (chunk_id, document_id, cik, ...)
-  API-->>Op: JSON or NDJSON progress events
+  Operator->>IngestAPI: ingest_request(payload)
+  IngestAPI->>SecEdgar: fetch_submission(cik)
+  IngestAPI->>SecEdgar: fetch_filing_html(accessionNo)
+  IngestAPI->>IngestAPI: strip_html_to_text()
+  IngestAPI->>IngestAPI: chunk_text()
+  IngestAPI->>Postgres: insert_documents_and_chunks()
+  IngestAPI->>Embeddings: embed_chunks()
+  IngestAPI->>Qdrant: upsert_vectors_with_payload()
+  IngestAPI-->>Operator: response(json_or_ndjson)
 ```
 
 ---
@@ -264,28 +339,26 @@ Extraction is run per document with `extractAndProjectDocument()` in `src/lib/ex
 
 ```mermaid
 sequenceDiagram
-  participant Op as Operator (UI / curl)
-  participant X as extractAndProjectDocument
-  participant PG as Postgres
-  participant LLM as LLM (structured extraction)
-  participant N as Neo4j
+  participant Operator as Operator
+  participant ExtractJob as ExtractJob
+  participant Postgres as Postgres
+  participant LLM as LLM_Extractor
+  participant Neo4j as Neo4j
 
-  Op->>X: {documentId, maxChunks?}
-  X->>PG: read document + chunks
-  X->>PG: insert extraction_runs(started)
-  X->>N: ensure constraints; upsert Filing + Chunk nodes
+  Operator->>ExtractJob: extract_request(documentId, maxChunks)
+  ExtractJob->>Postgres: load_document_and_chunks()
+  ExtractJob->>Postgres: insert_extraction_run(started)
+  ExtractJob->>Neo4j: upsert_filing_and_chunks()
 
-  loop for each chunk
-    X->>LLM: extract entities + relations
-    X->>PG: upsert entities
-    X->>PG: insert assertions (versioned, with provenance)
-    X->>N: upsert Entity nodes
-    X->>N: upsert (Chunk)-[:MENTIONS]->(Entity)
-    X->>N: upsert typed assertion edges (assertionId, validFrom/To, status)
+  loop for_each_chunk
+    ExtractJob->>LLM: extract_entities_and_relations()
+    ExtractJob->>Postgres: upsert_entities()
+    ExtractJob->>Postgres: insert_assertions_versioned()
+    ExtractJob->>Neo4j: upsert_entities_mentions_and_edges()
   end
 
-  X->>PG: update extraction_runs(finished)
-  X-->>Op: summary (processed/failed chunks, inserted assertions, etc.)
+  ExtractJob->>Postgres: update_extraction_run(finished)
+  ExtractJob-->>Operator: summary(processed, failed, assertions)
 ```
 
 ---
@@ -316,41 +389,41 @@ The chat endpoint is `src/app/api/chat/route.ts`. It streams responses via the V
 
 ```mermaid
 sequenceDiagram
-  participant U as User
-  participant UI as Next.js UI (/)
-  participant API as POST /api/chat
-  participant L as LLM (AI SDK)
-  participant Q as Qdrant
-  participant PG as Postgres
-  participant N as Neo4j
+  participant User as User
+  participant ChatUI as ChatUI
+  participant ChatAPI as ChatAPI
+  participant Agent as LLM_Agent
+  participant Qdrant as Qdrant
+  participant Postgres as Postgres
+  participant Neo4j as Neo4j
 
-  U->>UI: Ask a question
-  UI->>API: messages[]
-  API->>L: streamText(system + tools)
+  User->>ChatUI: question
+  ChatUI->>ChatAPI: messages
+  ChatAPI->>Agent: streamText(system, tools)
 
-  alt Semantic recall needed
-    L->>API: tool: vectorSearch(query, filters?)
-    API->>Q: search(doc_chunks)
-    Q-->>API: chunkIds + scores + payload
-    L->>API: tool: getCitations(chunkIds)
-    API->>PG: join document_chunks + documents
-    PG-->>API: citeable text + doc metadata
+  alt semantic_recall
+    Agent->>ChatAPI: tool(vectorSearch)
+    ChatAPI->>Qdrant: search(doc_chunks)
+    Qdrant-->>ChatAPI: chunkIds
+    Agent->>ChatAPI: tool(getCitations by chunkIds)
+    ChatAPI->>Postgres: join(document_chunks, documents)
+    Postgres-->>ChatAPI: citeable_text
   end
 
-  alt Graph reasoning needed
-    L->>API: tool: searchEntities("Apple" / "NVDA")
-    API->>PG: entities lookup
-    PG-->>API: entity ids
-    L->>API: tool: graphTraverse / explainPath
-    API->>N: Cypher traversal/path query
-    N-->>API: nodes/edges (often includes assertionId)
-    L->>API: tool: getCitations(assertionIds)
-    API->>PG: assertions → chunk/doc join
-    PG-->>API: evidence text
+  alt graph_reasoning
+    Agent->>ChatAPI: tool(searchEntities)
+    ChatAPI->>Postgres: lookup_entities
+    Postgres-->>ChatAPI: entityIds
+    Agent->>ChatAPI: tool(graphTraverse or explainPath)
+    ChatAPI->>Neo4j: cypher_traversal
+    Neo4j-->>ChatAPI: assertionIds
+    Agent->>ChatAPI: tool(getCitations by assertionIds)
+    ChatAPI->>Postgres: assertions_to_chunks
+    Postgres-->>ChatAPI: citeable_text
   end
 
-  API-->>UI: streamed answer (and optional tool traces)
-  UI-->>U: Final response + citations
+  ChatAPI-->>ChatUI: streamed_answer
+  ChatUI-->>User: answer_with_citations
 ```
 
 ---
@@ -365,27 +438,27 @@ Two key rules:
 
 ```mermaid
 sequenceDiagram
-  participant Op as Operator
-  participant API as POST /api/corrections
-  participant PG as Postgres
-  participant N as Neo4j
+  participant Operator as Operator
+  participant CorrectionsAPI as CorrectionsAPI
+  participant Postgres as Postgres
+  participant Neo4j as Neo4j
 
-  Op->>API: {action, targetAssertionId, newAssertion?}
-  API->>PG: load target assertion
+  Operator->>CorrectionsAPI: correction_request(payload)
+  CorrectionsAPI->>Postgres: load_target_assertion()
 
   alt action = retract
-    API->>PG: update assertions(status=retracted, validTo=now)
-    API->>PG: insert corrections(row)
-    API->>N: close edges where r.assertionId = target
+    CorrectionsAPI->>Postgres: update_assertion(retracted)
+    CorrectionsAPI->>Postgres: insert_correction_row()
+    CorrectionsAPI->>Neo4j: close_edges_by_assertionId()
   else action = supersede/override
-    API->>PG: update old assertion(status=superseded, validTo=now)
-    API->>PG: insert new assertion(status=active, validFrom=now)
-    API->>PG: insert corrections(row linking newAssertionId)
-    API->>N: close old edges (status=superseded)
-    API->>N: upsert new edge (status=active)
+    CorrectionsAPI->>Postgres: update_assertion(superseded)
+    CorrectionsAPI->>Postgres: insert_new_assertion(active)
+    CorrectionsAPI->>Postgres: insert_correction_row()
+    CorrectionsAPI->>Neo4j: close_old_edges()
+    CorrectionsAPI->>Neo4j: upsert_new_edge()
   end
 
-  API-->>Op: {correctionId, newAssertionId?, neo4jClosedEdges}
+  CorrectionsAPI-->>Operator: response(correctionId, newAssertionId, neo4jClosedEdges)
 ```
 
 ---
